@@ -1,10 +1,27 @@
 import sys,os
 
 import torch
+import csv
+refer_path = "./refers/noa_002_0009.wav"
+refer_text_path = "./refers/esd.list"
+refer_language = 'ja'
 
 # 推理用的指定模型
-sovits_path = ""
-gpt_path = ""
+refer_path = "./refers/noa_008_0040.wav"
+refer_text_path = "./refers/esd.list"
+refer_text = ""
+with open(refer_text_path, 'r') as f:
+    reader = csv.reader(f, delimiter='|')
+    for row in reader:
+        if row[0] == refer_path.split('/')[-1]:
+            refer_text = row[3].strip()
+            break
+if refer_text == "":
+    print("refer_text is Empty !")
+# 推理用的指定模型
+sovits_path = "./SoVITS_weights/noa_1_e8_s680.pth"
+gpt_path = "./GPT_weights/noa_1-e15.ckpt"
+
 is_half_str = os.environ.get("is_half", "True")
 is_half = True if is_half_str.lower() == 'true' else False
 is_share_str = os.environ.get("is_share","False")
@@ -64,3 +81,6 @@ class Config:
         self.webui_port_subfix = webui_port_subfix
 
         self.api_port = api_port
+        self.refer_path = refer_path
+        self.refer_text = refer_text
+        self.refer_language = refer_language

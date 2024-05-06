@@ -10,3 +10,7 @@ reference
 GPT_weights
 SoVITS_weights
 TEMP
+data
+processed
+GPT_Sovits/pretrained_models
+refers/
