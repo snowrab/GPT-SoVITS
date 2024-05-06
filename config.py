@@ -2,12 +2,9 @@ import sys,os
 
 import torch
 import csv
-refer_path = "./refers/noa_002_0009.wav"
-refer_text_path = "./refers/esd.list"
-refer_language = 'ja'
 
-# 推理用的指定模型
-refer_path = "./refers/noa_008_0040.wav"
+refer_language = 'ja'
+refer_path = "./refers/noa_002_0009.wav"
 refer_text_path = "./refers/esd.list"
 refer_text = ""
 with open(refer_text_path, 'r') as f:
