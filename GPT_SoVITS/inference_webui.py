@@ -6,8 +6,15 @@
 全部按英文识别
 全部按日文识别
 '''
+import os,sys
+now_dir = os.getcwd()
+sys.path.append(now_dir)
+sys.path.append("%s/GPT_SoVITS"%(now_dir))
+
+
+from resemble_enhance.enhancer.inference import denoise, enhance
+
 import os, re, logging
-import LangSegment
 logging.getLogger("markdown_it").setLevel(logging.ERROR)
 logging.getLogger("urllib3").setLevel(logging.ERROR)
 logging.getLogger("httpcore").setLevel(logging.ERROR)
@@ -17,32 +24,14 @@ logging.getLogger("charset_normalizer").setLevel(logging.ERROR)
 logging.getLogger("torchaudio._extension").setLevel(logging.ERROR)
 import pdb
 import torch
+import torchaudio
+import gc
+import librosa
+import soundfile as sf
 
-if os.path.exists("./gweight.txt"):
-    with open("./gweight.txt", 'r', encoding="utf-8") as file:
-        gweight_data = file.read()
-        gpt_path = os.environ.get(
-            "gpt_path", gweight_data)
-else:
-    gpt_path = os.environ.get(
-        "gpt_path", "GPT_SoVITS/pretrained_models/s1bert25hz-2kh-longer-epoch=68e-step=50232.ckpt")
+import time
 
-if os.path.exists("./sweight.txt"):
-    with open("./sweight.txt", 'r', encoding="utf-8") as file:
-        sweight_data = file.read()
-        sovits_path = os.environ.get("sovits_path", sweight_data)
-else:
-    sovits_path = os.environ.get("sovits_path", "GPT_SoVITS/pretrained_models/s2G488k.pth")
-# gpt_path = os.environ.get(
-#     "gpt_path", "pretrained_models/s1bert25hz-2kh-longer-epoch=68e-step=50232.ckpt"
-# )
-# sovits_path = os.environ.get("sovits_path", "pretrained_models/s2G488k.pth")
-cnhubert_base_path = os.environ.get(
-    "cnhubert_base_path", "GPT_SoVITS/pretrained_models/chinese-hubert-base"
-)
-bert_path = os.environ.get(
-    "bert_path", "GPT_SoVITS/pretrained_models/chinese-roberta-wwm-ext-large"
-)
+
 infer_ttswebui = os.environ.get("infer_ttswebui", 9872)
 infer_ttswebui = int(infer_ttswebui)
 is_share = os.environ.get("is_share", "False")
@@ -51,21 +40,11 @@ if "_CUDA_VISIBLE_DEVICES" in os.environ:
     os.environ["CUDA_VISIBLE_DEVICES"] = os.environ["_CUDA_VISIBLE_DEVICES"]
 is_half = eval(os.environ.get("is_half", "True")) and torch.cuda.is_available()
 import gradio as gr
-from transformers import AutoModelForMaskedLM, AutoTokenizer
-import numpy as np
-import librosa
-from feature_extractor import cnhubert
-
-cnhubert.cnhubert_base_path = cnhubert_base_path
-
-from module.models import SynthesizerTrn
-from AR.models.t2s_lightning_module import Text2SemanticLightningModule
-from text import cleaned_text_to_sequence
-from text.cleaner import clean_text
-from time import time as ttime
-from module.mel_processing import spectrogram_torch
-from my_utils import load_audio
+from TTS_infer_pack.TTS import TTS, TTS_Config
+from TTS_infer_pack.text_segmentation_method import cut1, cut2, cut3, cut4, cut5
+from TTS_infer_pack.text_segmentation_method import get_method
 from tools.i18n.i18n import I18nAuto
+import random
 
 i18n = I18nAuto()
 
@@ -76,127 +55,42 @@ if torch.cuda.is_available():
 else:
     device = "cpu"
 
-tokenizer = AutoTokenizer.from_pretrained(bert_path)
-bert_model = AutoModelForMaskedLM.from_pretrained(bert_path)
-if is_half == True:
-    bert_model = bert_model.half().to(device)
-else:
-    bert_model = bert_model.to(device)
+
+def clear_gpu_cash():
+    # del model
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+def _fn(path, solver="Midpoint", nfe=64, tau=0.5,chunk_seconds=10,chunks_overlap=0.5, denoising=True):
+    if path is None:
+        return None, None
+    print(path)
+    sf.write('./output.wav', path[1], path[0], 'PCM_24')
+
+    solver = solver.lower()
+    nfe = int(nfe)
+    lambd = 0.9 if denoising else 0.1
+
+    dwav, sr = torchaudio.load('./output.wav')
+    dwav = dwav.mean(dim=0)
+
+    wav2, new_sr = enhance(dwav = dwav, sr = sr, device = device, nfe=nfe,chunk_seconds=chunk_seconds,chunks_overlap=chunks_overlap, solver=solver, lambd=lambd, tau=tau)
+
+    wav2 = wav2.cpu().numpy()
+
+    clear_gpu_cash()
+    return (new_sr, wav2)
 
 
-def get_bert_feature(text, word2ph):
-    with torch.no_grad():
-        inputs = tokenizer(text, return_tensors="pt")
-        for i in inputs:
-            inputs[i] = inputs[i].to(device)
-        res = bert_model(**inputs, output_hidden_states=True)
-        res = torch.cat(res["hidden_states"][-3:-2], -1)[0].cpu()[1:-1]
-    assert len(word2ph) == len(text)
-    phone_level_feature = []
-    for i in range(len(word2ph)):
-        repeat_feature = res[i].repeat(word2ph[i], 1)
-        phone_level_feature.append(repeat_feature)
-    phone_level_feature = torch.cat(phone_level_feature, dim=0)
-    return phone_level_feature.T
+def set_seed(seed):
+    seed = seed if seed != -1 else random.randrange(1 << 32)
+    torch.manual_seed(seed)
+    print("Seed:", seed)
+    return seed
 
-
-class DictToAttrRecursive(dict):
-    def __init__(self, input_dict):
-        super().__init__(input_dict)
-        for key, value in input_dict.items():
-            if isinstance(value, dict):
-                value = DictToAttrRecursive(value)
-            self[key] = value
-            setattr(self, key, value)
-
-    def __getattr__(self, item):
-        try:
-            return self[item]
-        except KeyError:
-            raise AttributeError(f"Attribute {item} not found")
-
-    def __setattr__(self, key, value):
-        if isinstance(value, dict):
-            value = DictToAttrRecursive(value)
-        super(DictToAttrRecursive, self).__setitem__(key, value)
-        super().__setattr__(key, value)
-
-    def __delattr__(self, item):
-        try:
-            del self[item]
-        except KeyError:
-            raise AttributeError(f"Attribute {item} not found")
-
-
-ssl_model = cnhubert.get_model()
-if is_half == True:
-    ssl_model = ssl_model.half().to(device)
-else:
-    ssl_model = ssl_model.to(device)
-
-
-def change_sovits_weights(sovits_path):
-    global vq_model, hps
-    dict_s2 = torch.load(sovits_path, map_location="cpu")
-    hps = dict_s2["config"]
-    hps = DictToAttrRecursive(hps)
-    hps.model.semantic_frame_rate = "25hz"
-    vq_model = SynthesizerTrn(
-        hps.data.filter_length // 2 + 1,
-        hps.train.segment_size // hps.data.hop_length,
-        n_speakers=hps.data.n_speakers,
-        **hps.model
-    )
-    if ("pretrained" not in sovits_path):
-        del vq_model.enc_q
-    if is_half == True:
-        vq_model = vq_model.half().to(device)
-    else:
-        vq_model = vq_model.to(device)
-    vq_model.eval()
-    print(vq_model.load_state_dict(dict_s2["weight"], strict=False))
-    with open("./sweight.txt", "w", encoding="utf-8") as f:
-        f.write(sovits_path)
-
-
-change_sovits_weights(sovits_path)
-
-
-def change_gpt_weights(gpt_path):
-    global hz, max_sec, t2s_model, config
-    hz = 50
-    dict_s1 = torch.load(gpt_path, map_location="cpu")
-    config = dict_s1["config"]
-    max_sec = config["data"]["max_sec"]
-    t2s_model = Text2SemanticLightningModule(config, "****", is_train=False)
-    t2s_model.load_state_dict(dict_s1["weight"])
-    if is_half == True:
-        t2s_model = t2s_model.half()
-    t2s_model = t2s_model.to(device)
-    t2s_model.eval()
-    total = sum([param.nelement() for param in t2s_model.parameters()])
-    print("Number of parameter: %.2fM" % (total / 1e6))
-    with open("./gweight.txt", "w", encoding="utf-8") as f: f.write(gpt_path)
-
-
-change_gpt_weights(gpt_path)
-
-
-def get_spepc(hps, filename):
-    audio = load_audio(filename, int(hps.data.sampling_rate))
-    audio = torch.FloatTensor(audio)
-    audio_norm = audio
-    audio_norm = audio_norm.unsqueeze(0)
-    spec = spectrogram_torch(
-        audio_norm,
-        hps.data.filter_length,
-        hps.data.sampling_rate,
-        hps.data.hop_length,
-        hps.data.win_length,
-        center=False,
-    )
-    return spec
-
+def reuse_seed(seed):
+    return seed
 
 dict_language = {
     i18n("中文"): "all_zh",#全部按中文识别
@@ -207,313 +101,53 @@ dict_language = {
     i18n("多语种混合"): "auto",#多语种启动切分识别语种
 }
 
+cut_method = {
+    i18n("不切"):"cut0",
+    i18n("凑四句一切"): "cut1",
+    i18n("凑50字一切"): "cut2",
+    i18n("按中文句号。切"): "cut3",
+    i18n("按英文句号.切"): "cut4",
+    i18n("按标点符号切"): "cut5",
+}
 
-def clean_text_inf(text, language):
-    phones, word2ph, norm_text = clean_text(text, language)
-    phones = cleaned_text_to_sequence(phones)
-    return phones, word2ph, norm_text
+tts_config = TTS_Config("GPT_SoVITS/configs/tts_infer.yaml")
+tts_config.device = device
+tts_config.is_half = is_half
+tts_pipline = TTS(tts_config)
+gpt_path = tts_config.t2s_weights_path
+sovits_path = tts_config.vits_weights_path
 
-dtype=torch.float16 if is_half == True else torch.float32
-def get_bert_inf(phones, word2ph, norm_text, language):
-    language=language.replace("all_","")
-    if language == "zh":
-        bert = get_bert_feature(norm_text, word2ph).to(device)#.to(dtype)
-    else:
-        bert = torch.zeros(
-            (1024, len(phones)),
-            dtype=torch.float16 if is_half == True else torch.float32,
-        ).to(device)
+def inference(text, text_lang, 
+              ref_audio_path, prompt_text, 
+              prompt_lang, top_k, 
+              top_p, temperature, 
+              text_split_method, batch_size, 
+              speed_factor, ref_text_free,
+              split_bucket,fragment_interval,
+              ):
+    start_time = time.time()  # 记录开始时间
+    inputs={
+        "text": text,
+        "text_lang": dict_language[text_lang],
+        "ref_audio_path": ref_audio_path,
+        "prompt_text": prompt_text if not ref_text_free else "",
+        "prompt_lang": dict_language[prompt_lang],
+        "top_k": top_k,
+        "top_p": top_p,
+        "temperature": temperature,
+        "text_split_method": cut_method[text_split_method],
+        "batch_size":int(batch_size),
+        "speed_factor":float(speed_factor),
+        "split_bucket":split_bucket,
+        "return_fragment":False,
+        "fragment_interval":fragment_interval,
+    }
 
-    return bert
+    yield next(tts_pipline.run(inputs))
 
-
-splits = {"，", "。", "？", "！", ",", ".", "?", "!", "~", ":", "：", "—", "…", }
-
-
-def get_first(text):
-    pattern = "[" + "".join(re.escape(sep) for sep in splits) + "]"
-    text = re.split(pattern, text)[0].strip()
-    return text
-
-
-def get_phones_and_bert(text,language):
-    if language in {"en","all_zh","all_ja"}:
-        language = language.replace("all_","")
-        if language == "en":
-            LangSegment.setfilters(["en"])
-            formattext = " ".join(tmp["text"] for tmp in LangSegment.getTexts(text))
-        else:
-            # 因无法区别中日文汉字,以用户输入为准
-            formattext = text
-        while "  " in formattext:
-            formattext = formattext.replace("  ", " ")
-        phones, word2ph, norm_text = clean_text_inf(formattext, language)
-        if language == "zh":
-            bert = get_bert_feature(norm_text, word2ph).to(device)
-        else:
-            bert = torch.zeros(
-                (1024, len(phones)),
-                dtype=torch.float16 if is_half == True else torch.float32,
-            ).to(device)
-    elif language in {"zh", "ja","auto"}:
-        textlist=[]
-        langlist=[]
-        LangSegment.setfilters(["zh","ja","en","ko"])
-        if language == "auto":
-            for tmp in LangSegment.getTexts(text):
-                if tmp["lang"] == "ko":
-                    langlist.append("zh")
-                    textlist.append(tmp["text"])
-                else:
-                    langlist.append(tmp["lang"])
-                    textlist.append(tmp["text"])
-        else:
-            for tmp in LangSegment.getTexts(text):
-                if tmp["lang"] == "en":
-                    langlist.append(tmp["lang"])
-                else:
-                    # 因无法区别中日文汉字,以用户输入为准
-                    langlist.append(language)
-                textlist.append(tmp["text"])
-        print(textlist)
-        print(langlist)
-        phones_list = []
-        bert_list = []
-        norm_text_list = []
-        for i in range(len(textlist)):
-            lang = langlist[i]
-            phones, word2ph, norm_text = clean_text_inf(textlist[i], lang)
-            bert = get_bert_inf(phones, word2ph, norm_text, lang)
-            phones_list.append(phones)
-            norm_text_list.append(norm_text)
-            bert_list.append(bert)
-        bert = torch.cat(bert_list, dim=1)
-        phones = sum(phones_list, [])
-        norm_text = ''.join(norm_text_list)
-
-    return phones,bert.to(dtype),norm_text
-
-
-def merge_short_text_in_array(texts, threshold):
-    if (len(texts)) < 2:
-        return texts
-    result = []
-    text = ""
-    for ele in texts:
-        text += ele
-        if len(text) >= threshold:
-            result.append(text)
-            text = ""
-    if (len(text) > 0):
-        if len(result) == 0:
-            result.append(text)
-        else:
-            result[len(result) - 1] += text
-    return result
-
-def get_tts_wav(ref_wav_path, prompt_text, prompt_language, text, text_language, how_to_cut=i18n("不切"), top_k=20, top_p=0.6, temperature=0.6, ref_free = False):
-    if prompt_text is None or len(prompt_text) == 0:
-        ref_free = True
-    t0 = ttime()
-    prompt_language = dict_language[prompt_language]
-    text_language = dict_language[text_language]
-    if not ref_free:
-        prompt_text = prompt_text.strip("\n")
-        if (prompt_text[-1] not in splits): prompt_text += "。" if prompt_language != "en" else "."
-        print(i18n("实际输入的参考文本:"), prompt_text)
-    text = text.strip("\n")
-    if (text[0] not in splits and len(get_first(text)) < 4): text = "。" + text if text_language != "en" else "." + text
-    
-    print(i18n("实际输入的目标文本:"), text)
-    zero_wav = np.zeros(
-        int(hps.data.sampling_rate * 0.3),
-        dtype=np.float16 if is_half == True else np.float32,
-    )
-    with torch.no_grad():
-        wav16k, sr = librosa.load(ref_wav_path, sr=16000)
-        if (wav16k.shape[0] > 160000 or wav16k.shape[0] < 48000):
-            raise OSError(i18n("参考音频在3~10秒范围外，请更换！"))
-        wav16k = torch.from_numpy(wav16k)
-        zero_wav_torch = torch.from_numpy(zero_wav)
-        if is_half == True:
-            wav16k = wav16k.half().to(device)
-            zero_wav_torch = zero_wav_torch.half().to(device)
-        else:
-            wav16k = wav16k.to(device)
-            zero_wav_torch = zero_wav_torch.to(device)
-        wav16k = torch.cat([wav16k, zero_wav_torch])
-        ssl_content = ssl_model.model(wav16k.unsqueeze(0))[
-            "last_hidden_state"
-        ].transpose(
-            1, 2
-        )  # .float()
-        codes = vq_model.extract_latent(ssl_content)
-   
-        prompt_semantic = codes[0, 0]
-    t1 = ttime()
-
-    if (how_to_cut == i18n("凑四句一切")):
-        text = cut1(text)
-    elif (how_to_cut == i18n("凑50字一切")):
-        text = cut2(text)
-    elif (how_to_cut == i18n("按中文句号。切")):
-        text = cut3(text)
-    elif (how_to_cut == i18n("按英文句号.切")):
-        text = cut4(text)
-    elif (how_to_cut == i18n("按标点符号切")):
-        text = cut5(text)
-    while "\n\n" in text:
-        text = text.replace("\n\n", "\n")
-    print(i18n("实际输入的目标文本(切句后):"), text)
-    texts = text.split("\n")
-    texts = merge_short_text_in_array(texts, 5)
-    audio_opt = []
-    if not ref_free:
-        phones1,bert1,norm_text1=get_phones_and_bert(prompt_text, prompt_language)
-
-    for text in texts:
-        # 解决输入目标文本的空行导致报错的问题
-        if (len(text.strip()) == 0):
-            continue
-        if (text[-1] not in splits): text += "。" if text_language != "en" else "."
-        print(i18n("实际输入的目标文本(每句):"), text)
-        phones2,bert2,norm_text2=get_phones_and_bert(text, text_language)
-        print(i18n("前端处理后的文本(每句):"), norm_text2)
-        if not ref_free:
-            bert = torch.cat([bert1, bert2], 1)
-            all_phoneme_ids = torch.LongTensor(phones1+phones2).to(device).unsqueeze(0)
-        else:
-            bert = bert2
-            all_phoneme_ids = torch.LongTensor(phones2).to(device).unsqueeze(0)
-
-        bert = bert.to(device).unsqueeze(0)
-        all_phoneme_len = torch.tensor([all_phoneme_ids.shape[-1]]).to(device)
-        prompt = prompt_semantic.unsqueeze(0).to(device)
-        t2 = ttime()
-        with torch.no_grad():
-            # pred_semantic = t2s_model.model.infer(
-            pred_semantic, idx = t2s_model.model.infer_panel(
-                all_phoneme_ids,
-                all_phoneme_len,
-                None if ref_free else prompt,
-                bert,
-                # prompt_phone_len=ph_offset,
-                top_k=top_k,
-                top_p=top_p,
-                temperature=temperature,
-                early_stop_num=hz * max_sec,
-            )
-        t3 = ttime()
-        # print(pred_semantic.shape,idx)
-        pred_semantic = pred_semantic[:, -idx:].unsqueeze(
-            0
-        )  # .unsqueeze(0)#mq要多unsqueeze一次
-        refer = get_spepc(hps, ref_wav_path)  # .to(device)
-        if is_half == True:
-            refer = refer.half().to(device)
-        else:
-            refer = refer.to(device)
-        # audio = vq_model.decode(pred_semantic, all_phoneme_ids, refer).detach().cpu().numpy()[0, 0]
-        audio = (
-            vq_model.decode(
-                pred_semantic, torch.LongTensor(phones2).to(device).unsqueeze(0), refer
-            )
-                .detach()
-                .cpu()
-                .numpy()[0, 0]
-        )  ###试试重建不带上prompt部分
-        max_audio=np.abs(audio).max()#简单防止16bit爆音
-        if max_audio>1:audio/=max_audio
-        audio_opt.append(audio)
-        audio_opt.append(zero_wav)
-        t4 = ttime()
-    print("%.3f\t%.3f\t%.3f\t%.3f" % (t1 - t0, t2 - t1, t3 - t2, t4 - t3))
-    yield hps.data.sampling_rate, (np.concatenate(audio_opt, 0) * 32768).astype(
-        np.int16
-    )
-
-
-def split(todo_text):
-    todo_text = todo_text.replace("……", "。").replace("——", "，")
-    if todo_text[-1] not in splits:
-        todo_text += "。"
-    i_split_head = i_split_tail = 0
-    len_text = len(todo_text)
-    todo_texts = []
-    while 1:
-        if i_split_head >= len_text:
-            break  # 结尾一定有标点，所以直接跳出即可，最后一段在上次已加入
-        if todo_text[i_split_head] in splits:
-            i_split_head += 1
-            todo_texts.append(todo_text[i_split_tail:i_split_head])
-            i_split_tail = i_split_head
-        else:
-            i_split_head += 1
-    return todo_texts
-
-
-def cut1(inp):
-    inp = inp.strip("\n")
-    inps = split(inp)
-    split_idx = list(range(0, len(inps), 4))
-    split_idx[-1] = None
-    if len(split_idx) > 1:
-        opts = []
-        for idx in range(len(split_idx) - 1):
-            opts.append("".join(inps[split_idx[idx]: split_idx[idx + 1]]))
-    else:
-        opts = [inp]
-    return "\n".join(opts)
-
-
-def cut2(inp):
-    inp = inp.strip("\n")
-    inps = split(inp)
-    if len(inps) < 2:
-        return inp
-    opts = []
-    summ = 0
-    tmp_str = ""
-    for i in range(len(inps)):
-        summ += len(inps[i])
-        tmp_str += inps[i]
-        if summ > 50:
-            summ = 0
-            opts.append(tmp_str)
-            tmp_str = ""
-    if tmp_str != "":
-        opts.append(tmp_str)
-    # print(opts)
-    if len(opts) > 1 and len(opts[-1]) < 50:  ##如果最后一个太短了，和前一个合一起
-        opts[-2] = opts[-2] + opts[-1]
-        opts = opts[:-1]
-    return "\n".join(opts)
-
-
-def cut3(inp):
-    inp = inp.strip("\n")
-    return "\n".join(["%s" % item for item in inp.strip("。").split("。")])
-
-
-def cut4(inp):
-    inp = inp.strip("\n")
-    return "\n".join(["%s" % item for item in inp.strip(".").split(".")])
-
-
-# contributed by https://github.com/AI-Hobbyist/GPT-SoVITS/blob/main/GPT_SoVITS/inference_webui.py
-def cut5(inp):
-    # if not re.search(r'[^\w\s]', inp[-1]):
-    # inp += '。'
-    inp = inp.strip("\n")
-    punds = r'[,.;?!、，。？！;：…]'
-    items = re.split(f'({punds})', inp)
-    mergeitems = ["".join(group) for group in zip(items[::2], items[1::2])]
-    # 在句子不存在符号或句尾无符号的时候保证文本完整
-    if len(items)%2 == 1:
-        mergeitems.append(items[-1])
-    opt = "\n".join(mergeitems)
-    return opt
-
+    end_time = time.time()  # 记录结束时间
+    elapsed_time = end_time - start_time  # 计算经过的时间
+    print(f"推理 executed in {elapsed_time:.6f} seconds")  # 输出执行时间，保留6位小数  
 
 def custom_sort_key(s):
     # 使用正则表达式提取字符串中的数字部分和非数字部分
@@ -523,9 +157,81 @@ def custom_sort_key(s):
     return parts
 
 
+# 初始化引导音频列表
+
+
+def replace_chinese(text):
+    pattern = r'([\u4e00-\u9fa5]{5}).*'
+    result = re.sub(pattern, r'\1...', text)
+    return result
+
+def init_wav_list(sovits_path):
+
+    wav_path = "./output/slicer_opt"
+    match = re.search(r'([a-zA-Z0-9\-_]+)_e\d+_s\d+\.pth',sovits_path)
+    if match:
+        result = match.group(1)
+        wav_path = f"./logs/{result}/5-wav32k/"
+    else:
+        return [],{}
+
+    res_wavs = {}
+
+    res_text = ["请选择参考音频"]
+
+    # 读取文本
+    text = ""
+    with open(rf'./logs/{result}/2-name2text.txt', 'r',encoding='utf-8') as f:
+        text = f.read()
+
+    # 遍历目录
+    for file_path in os.listdir(wav_path)[:100]:
+        # 检查当前file_path是否为文件
+        if os.path.isfile(os.path.join(wav_path, file_path)):
+            # 将文件名添加到列表中
+            match = re.search(rf'{file_path}\t(.+?)\t(.+?)\t(.+?)\n', text)
+            if match:
+                # 提取匹配到的内容
+                extracted_text = match.group(3)
+                # print(extracted_text)
+                
+                # 传入音频文件路径，获取音频数据和采样率
+                audio_data, sample_rate = librosa.load(f'./logs/{result}/5-wav32k/{file_path}')
+                # 使用librosa.get_duration函数计算音频文件的长度
+                duration = librosa.get_duration(y=audio_data, sr=sample_rate)
+                duration = int(duration)
+                key = f"{replace_chinese(extracted_text)}_{duration}秒"
+                res_text.append(key)
+                res_wavs[key] = (f'./logs/{result}/5-wav32k/{file_path}',extracted_text)
+
+
+            else:
+                print("No match found")
+
+    # print(res_text)
+    # print(res_wavs)
+
+    return res_text,res_wavs
+
+# 切换参考音频
+
+def change_wav(audio_name):
+
+    first_key = list(reference_dict.keys())[0]
+
+    try:
+        value = reference_dict[audio_name]
+        return value[0],value[1]
+    except Exception as e:
+        return reference_dict[first_key][0],reference_dict[first_key][1]
+
+
 def change_choices():
     SoVITS_names, GPT_names = get_weights_names()
     return {"choices": sorted(SoVITS_names, key=custom_sort_key), "__type__": "update"}, {"choices": sorted(GPT_names, key=custom_sort_key), "__type__": "update"}
+
+
+
 
 
 pretrained_sovits_name = "GPT_SoVITS/pretrained_models/s2G488k.pth"
@@ -548,75 +254,317 @@ def get_weights_names():
 
 SoVITS_names, GPT_names = get_weights_names()
 
-with gr.Blocks(title="GPT-SoVITS WebUI") as app:
-    gr.Markdown(
-        value=i18n("本软件以MIT协议开源, 作者不对软件具备任何控制力, 使用软件者、传播软件导出的声音者自负全责. <br>如不认可该条款, 则不能使用或引用软件包内任何代码和文件. 详见根目录<b>LICENSE</b>.")
-    )
-    with gr.Group():
-        gr.Markdown(value=i18n("模型切换"))
-        with gr.Row():
-            GPT_dropdown = gr.Dropdown(label=i18n("GPT模型列表"), choices=sorted(GPT_names, key=custom_sort_key), value=gpt_path, interactive=True)
-            SoVITS_dropdown = gr.Dropdown(label=i18n("SoVITS模型列表"), choices=sorted(SoVITS_names, key=custom_sort_key), value=sovits_path, interactive=True)
-            refresh_button = gr.Button(i18n("刷新模型路径"), variant="primary")
-            refresh_button.click(fn=change_choices, inputs=[], outputs=[SoVITS_dropdown, GPT_dropdown])
-            SoVITS_dropdown.change(change_sovits_weights, [SoVITS_dropdown], [])
-            GPT_dropdown.change(change_gpt_weights, [GPT_dropdown], [])
-        gr.Markdown(value=i18n("*请上传并填写参考信息"))
-        with gr.Row():
-            inp_ref = gr.Audio(label=i18n("请上传3~10秒内参考音频，超过会报错！"), type="filepath")
-            with gr.Column():
-                ref_text_free = gr.Checkbox(label=i18n("开启无参考文本模式。不填参考文本亦相当于开启。"), value=False, interactive=True, show_label=True)
-                gr.Markdown(i18n("使用无参考文本模式时建议使用微调的GPT，听不清参考音频说的啥(不晓得写啥)可以开，开启后无视填写的参考文本。"))
-                prompt_text = gr.Textbox(label=i18n("参考音频的文本"), value="")
-            prompt_language = gr.Dropdown(
-                label=i18n("参考音频的语种"), choices=[i18n("中文"), i18n("英文"), i18n("日文"), i18n("中英混合"), i18n("日英混合"), i18n("多语种混合")], value=i18n("中文")
-            )
-        gr.Markdown(value=i18n("*请填写需要合成的目标文本和语种模式"))
-        with gr.Row():
-            text = gr.Textbox(label=i18n("需要合成的文本"), value="")
-            text_language = gr.Dropdown(
-                label=i18n("需要合成的语种"), choices=[i18n("中文"), i18n("英文"), i18n("日文"), i18n("中英混合"), i18n("日英混合"), i18n("多语种混合")], value=i18n("中文")
-            )
-            how_to_cut = gr.Radio(
-                label=i18n("怎么切"),
-                choices=[i18n("不切"), i18n("凑四句一切"), i18n("凑50字一切"), i18n("按中文句号。切"), i18n("按英文句号.切"), i18n("按标点符号切"), ],
-                value=i18n("凑四句一切"),
-                interactive=True,
-            )
-            with gr.Row():
-                gr.Markdown(value=i18n("gpt采样参数(无参考文本时不要太低)："))
-                top_k = gr.Slider(minimum=1,maximum=100,step=1,label=i18n("top_k"),value=5,interactive=True)
-                top_p = gr.Slider(minimum=0,maximum=1,step=0.05,label=i18n("top_p"),value=1,interactive=True)
-                temperature = gr.Slider(minimum=0,maximum=1,step=0.05,label=i18n("temperature"),value=1,interactive=True)
-            inference_button = gr.Button(i18n("合成语音"), variant="primary")
-            output = gr.Audio(label=i18n("输出的语音"))
 
-        inference_button.click(
-            get_tts_wav,
-            [inp_ref, prompt_text, prompt_language, text, text_language, how_to_cut, top_k, top_p, temperature, ref_text_free],
-            [output],
+reference_wavs,reference_dict = init_wav_list(sovits_path)
+
+
+#region 输出音频历史记录相关
+output_history =[]
+history_max_num = 10
+
+
+
+
+def sync_output_history_to_checkbox_audio():
+    checkbox_result = []
+    audio_result = []
+    for item in output_history:
+        label = item['label']
+        if len(label)>15:
+            label=label[:15]+'...'
+        checkbox_result.append(gr.update(label=label,value=False))
+        audio_result.append(gr.update(value=item['value']))
+    for _ in range(len(audio_result),history_max_num):
+        checkbox_result.append(gr.update(label="",value=False))
+        audio_result.append(gr.update(value = None))
+    return [*checkbox_result,*audio_result]
+
+def add_to_history(audio,input_text):
+    if(audio is None or audio[1] is not None):
+        if len(output_history) == history_max_num:
+            output_history.pop()
+        output_history.insert(0,{'value':audio,'label':input_text})
+
+    return [*sync_output_history_to_checkbox_audio()]
+
+
+# 连续抽卡
+
+def inference_take(text, text_lang, 
+              ref_audio_path, prompt_text, 
+              prompt_lang, top_k, 
+              top_p, temperature, 
+              text_split_method, batch_size, 
+              speed_factor, ref_text_free,
+              split_bucket,fragment_interval
+              ):
+    inputs={
+        "text": text,
+        "text_lang": dict_language[text_lang],
+        "ref_audio_path": ref_audio_path,
+        "prompt_text": prompt_text if not ref_text_free else "",
+        "prompt_lang": dict_language[prompt_lang],
+        "top_k": top_k,
+        "top_p": top_p,
+        "temperature": temperature,
+        "text_split_method": cut_method[text_split_method],
+        "batch_size":int(batch_size),
+        "speed_factor":float(speed_factor),
+        "split_bucket":split_bucket,
+        "return_fragment":False,
+    }
+
+    for x in range(history_max_num):
+
+        audio = next(tts_pipline.run(inputs))
+
+        output_history.insert(0,audio)
+
+    return output_history
+
+
+
+def clear_history():
+    output_history = []
+    checkbox_result = []
+    audio_result = []
+    for _ in range(history_max_num):
+        checkbox_result.append(gr.update(label="",value=False))
+        audio_result.append(gr.update(value = None))
+    return [*checkbox_result,*audio_result]
+
+def shown_audio_num_change(audio_num):
+    audio_num = int(audio_num)
+    audio_result = []
+    checkbox_result = []
+    for _ in range(audio_num):
+        audio_result.append(gr.update(visible=True))
+        checkbox_result.append(gr.update(visible=True))
+    for _ in range(audio_num,history_max_num):
+        audio_result.append(gr.update(visible=False))
+        checkbox_result.append(gr.update(visible=False))
+    return [*checkbox_result,*audio_result]
+
+def delete_selected_history(*selected_list):
+    for i in reversed(range(len(output_history))):
+        if(selected_list[i]):
+            output_history.pop(i)
+    return [*sync_output_history_to_checkbox_audio()]
+
+def merge_selected_history(*selected_list):
+    m_list = []
+    labels = ""
+    for i in reversed(range(len(output_history))):
+        if(selected_list[i]):
+            labels+=" "+output_history[i]["label"]
+            m_list.append(output_history[i]["value"][1])
+    if(m_list):
+        combined = np.hstack(m_list)
+        delete_selected_history(*selected_list)       
+        return add_to_history((32000, combined),labels)
+    return [*sync_output_history_to_checkbox_audio()]
+
+
+
+
+
+
+
+
+def change_sovits_weights(sovits_path):
+    
+    sovits_path = sovits_path.replace("SoVITS_weights/","")
+
+    print(sovits_path)
+
+    global reference_wavs,reference_dict
+    reference_wavs,reference_dict = init_wav_list(sovits_path)
+
+    # return gr.Dropdown.update(choices=reference_wavs)
+    return gr.update(choices=reference_wavs)
+
+def main():
+
+    with gr.Blocks(title="GPT-SoVITS WebUI") as app:
+        gr.Markdown(
+            value=i18n("本软件以MIT协议开源, 作者不对软件具备任何控制力, 使用软件者、传播软件导出的声音者自负全责. <br>如不认可该条款, 则不能使用或引用软件包内任何代码和文件. 详见根目录<b>LICENSE</b>.")
         )
+        
+        with gr.Column():
+            # with gr.Group():
+            gr.Markdown(value=i18n("模型切换"))
+            with gr.Row():
+                GPT_dropdown = gr.Dropdown(label=i18n("GPT模型列表"), choices=sorted(GPT_names, key=custom_sort_key), value=gpt_path, interactive=True)
+                SoVITS_dropdown = gr.Dropdown(label=i18n("SoVITS模型列表"), choices=sorted(SoVITS_names, key=custom_sort_key), value=sovits_path, interactive=True)
+                wavs_dropdown = gr.Dropdown(label=i18n("参考音频列表"), choices=reference_wavs,value="请选择参考音频",interactive=True)
+                refresh_button = gr.Button(i18n("刷新模型路径"), variant="primary")
+                refresh_button.click(fn=change_choices, inputs=[], outputs=[SoVITS_dropdown, GPT_dropdown])
+                
+                # SoVITS_dropdown.change(tts_pipline.init_vits_weights, [SoVITS_dropdown], [])
 
-        gr.Markdown(value=i18n("文本切分工具。太长的文本合成出来效果不一定好，所以太长建议先切。合成会根据文本的换行分开合成再拼起来。"))
+                SoVITS_dropdown.change(change_sovits_weights,[SoVITS_dropdown],[wavs_dropdown]).then(
+
+                    tts_pipline.init_vits_weights, [SoVITS_dropdown], []
+
+                )
+
+                GPT_dropdown.change(tts_pipline.init_t2s_weights, [GPT_dropdown], [])
+        
         with gr.Row():
-            text_inp = gr.Textbox(label=i18n("需要合成的切分前文本"), value="")
-            button1 = gr.Button(i18n("凑四句一切"), variant="primary")
-            button2 = gr.Button(i18n("凑50字一切"), variant="primary")
-            button3 = gr.Button(i18n("按中文句号。切"), variant="primary")
-            button4 = gr.Button(i18n("按英文句号.切"), variant="primary")
-            button5 = gr.Button(i18n("按标点符号切"), variant="primary")
-            text_opt = gr.Textbox(label=i18n("切分后文本"), value="")
-            button1.click(cut1, [text_inp], [text_opt])
-            button2.click(cut2, [text_inp], [text_opt])
-            button3.click(cut3, [text_inp], [text_opt])
-            button4.click(cut4, [text_inp], [text_opt])
-            button5.click(cut5, [text_inp], [text_opt])
-        gr.Markdown(value=i18n("后续将支持转音素、手工修改音素、语音合成分步执行。"))
+            with gr.Column():
+                gr.Markdown(value=i18n("*请上传并填写参考信息"))
+                inp_ref = gr.Audio(label=i18n("请上传3~10秒内参考音频，超过会报错！"), type="filepath")
+                prompt_text = gr.Textbox(label=i18n("参考音频的文本"), value="", lines=2)
+                with gr.Row():
+                    prompt_language = gr.Dropdown(
+                        label=i18n("参考音频的语种"), choices=[i18n("中文"), i18n("英文"), i18n("日文"), i18n("中英混合"), i18n("日英混合"), i18n("多语种混合")], value=i18n("中文")
+                    )
+                    with gr.Column():
+                        ref_text_free = gr.Checkbox(label=i18n("开启无参考文本模式。不填参考文本亦相当于开启。"), value=False, interactive=True, show_label=True)
+                        gr.Markdown(i18n("使用无参考文本模式时建议使用微调的GPT，听不清参考音频说的啥(不晓得写啥)可以开，开启后无视填写的参考文本。"))
+            wavs_dropdown.change(change_wav,[wavs_dropdown],[inp_ref,prompt_text])
+        
+            with gr.Column():
+                gr.Markdown(value=i18n("*请填写需要合成的目标文本和语种模式"))
+                text = gr.Textbox(label=i18n("需要合成的文本"), value="", lines=16, max_lines=16)
+                text_language = gr.Dropdown(
+                    label=i18n("需要合成的语种"), choices=[i18n("中文"), i18n("英文"), i18n("日文"), i18n("中英混合"), i18n("日英混合"), i18n("多语种混合")], value=i18n("中文")
+                )
 
-app.queue(max_size=1022).launch(
-    server_name="0.0.0.0",
-    inbrowser=True,
-    share=is_share,
-    server_port=infer_ttswebui,
-    quiet=True,
-)
+            
+        with gr.Group():
+            gr.Markdown(value=i18n("推理设置"))
+            with gr.Row():
+
+                with gr.Column():
+                    batch_size = gr.Slider(minimum=1,maximum=200,step=1,label=i18n("batch_size"),value=20,interactive=True)
+                    fragment_interval = gr.Slider(minimum=0.01,maximum=1,step=0.01,label=i18n("分段间隔(秒)"),value=0.3,interactive=True)
+                    speed_factor = gr.Slider(minimum=0.25,maximum=4,step=0.05,label="speed_factor",value=1.0,interactive=True)
+                    top_k = gr.Slider(minimum=1,maximum=100,step=1,label=i18n("top_k"),value=5,interactive=True)
+                    top_p = gr.Slider(minimum=0,maximum=1,step=0.05,label=i18n("top_p"),value=0.8,interactive=True)
+                    temperature = gr.Slider(minimum=0,maximum=1,step=0.05,label=i18n("temperature"),value=0.8,interactive=True)
+                with gr.Column():
+                    seed = gr.Number(label=i18n("种子"), value=-1, precision=0)
+                    last_seed = gr.State(value=-1)
+                    reuse_button = gr.Button(value=i18n("种子复用"))
+                    how_to_cut = gr.Radio(
+                        label=i18n("怎么切"),
+                        choices=[i18n("不切"), i18n("凑四句一切"), i18n("凑50字一切"), i18n("按中文句号。切"), i18n("按英文句号.切"), i18n("按标点符号切"), ],
+                        value=i18n("按标点符号切"),
+                        interactive=True,
+                    )
+                    split_bucket = gr.Checkbox(label=i18n("数据分桶(可能会降低一点计算量,选就对了)"), value=True, interactive=True, show_label=True)
+                # with gr.Column():
+                    output = gr.Audio(label=i18n("输出的语音"),show_download_button=True)
+                    with gr.Row():
+                        reuse_button.click(reuse_seed, last_seed, seed)
+                        inference_button = gr.Button(i18n("合成语音"), variant="primary")
+                        stop_infer = gr.Button(i18n("终止合成"), variant="primary")
+                        up_button = gr.Button(i18n("音频降噪增强"), variant="primary")
+
+                        take_button = gr.Button(i18n("连续抽卡"), variant="primary")
+
+            inference_button.click(set_seed, seed, last_seed).then(
+                inference,
+                [
+                    text,text_language, inp_ref, 
+                    prompt_text, prompt_language, 
+                    top_k, top_p, temperature, 
+                    how_to_cut, batch_size, 
+                    speed_factor, ref_text_free,
+                    split_bucket,fragment_interval
+                ],
+                [output],
+            )   
+            
+            # inference_button.click(
+            #     inference,
+            #     [
+            #         text,text_language, inp_ref, 
+            #         prompt_text, prompt_language, 
+            #         top_k, top_p, temperature, 
+            #         how_to_cut, batch_size, 
+            #         speed_factor, ref_text_free,
+            #         split_bucket,fragment_interval
+            #     ],
+            #     [output],
+            # )
+
+
+            
+
+            stop_infer.click(tts_pipline.stop, [], [])
+            up_button.click(_fn, [output], [output])
+
+        with gr.Group():
+            gr.Markdown(value=i18n("文本切分工具。太长的文本合成出来效果不一定好，所以太长建议先切。合成会根据文本的换行分开合成再拼起来。"))
+            with gr.Row():
+                text_inp = gr.Textbox(label=i18n("需要合成的切分前文本"), value="", lines=4)
+                with gr.Column():
+                    _how_to_cut = gr.Radio(
+                                label=i18n("怎么切"),
+                                choices=[i18n("不切"), i18n("凑四句一切"), i18n("凑50字一切"), i18n("按中文句号。切"), i18n("按英文句号.切"), i18n("按标点符号切"), ],
+                                value=i18n("凑四句一切"),
+                                interactive=True,
+                            )
+                    cut_text= gr.Button(i18n("切分"), variant="primary")
+                
+                def to_cut(text_inp, how_to_cut):
+                    if len(text_inp.strip()) == 0 or text_inp==[]:
+                        return ""
+                    method = get_method(cut_method[how_to_cut])
+                    return method(text_inp)
+            
+                text_opt = gr.Textbox(label=i18n("切分后文本"), value="", lines=4)
+                cut_text.click(to_cut, [text_inp, _how_to_cut], [text_opt])
+            gr.Markdown(value=i18n("后续将支持转音素、手工修改音素、语音合成分步执行。"))
+
+            history_audio = []
+            history_checkbox = []
+            with gr.Accordion("生成历史"):
+                with gr.Row():
+                    shown_audio_num = gr.Slider(1,20,history_max_num,step=1,interactive=True,label="记录显示数量")
+                    add_history_button = gr.Button("添加当前音频记录",variant="primary")
+                    merge_audio_button = gr.Button("合并选中音频",variant="primary")
+                    delete_select_history_button = gr.Button("删除选择的记录")
+                    clear_history_button = gr.Button("清空记录")
+                index=0
+                while(index<history_max_num):
+                    index += 5
+                    with gr.Row():
+                        for _ in range(5):
+                            with gr.Row():
+                                with gr.Group():
+                                    history_checkbox.append(gr.Checkbox(interactive=True,show_label=False,label=""))
+                                    history_audio.append(gr.Audio(label="",show_download_button=True))
+
+                shown_audio_num.change(shown_audio_num_change,[shown_audio_num],[*history_checkbox,*history_audio])
+                add_history_button.click(add_to_history,[output,text],[*history_checkbox,*history_audio])
+                merge_audio_button.click(merge_selected_history,[*history_checkbox],[*history_checkbox,*history_audio])
+                delete_select_history_button.click(delete_selected_history,[*history_checkbox],[*history_checkbox,*history_audio])
+                clear_history_button.click(clear_history,outputs=[*history_checkbox,*history_audio])
+
+                take_button.click(
+                inference_take,
+                [
+                    text,text_language, inp_ref, 
+                    prompt_text, prompt_language, 
+                    top_k, top_p, temperature, 
+                    how_to_cut, batch_size, 
+                    speed_factor, ref_text_free,
+                    split_bucket,fragment_interval
+                ],
+                [*history_audio],
+            )
+
+    app.queue().launch(
+        server_name="0.0.0.0",
+        inbrowser=True,
+        share=is_share,
+        server_port=infer_ttswebui,
+        quiet=True,
+    )
+
+
+if __name__ == '__main__':
+    main()
