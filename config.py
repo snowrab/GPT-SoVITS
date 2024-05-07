@@ -2,7 +2,7 @@ import sys,os
 
 import torch
 import csv
-
+#
 refer_language = 'ja'
 refer_path = "./refers/noa_002_0009.wav"
 refer_text_path = "./refers/esd.list"
