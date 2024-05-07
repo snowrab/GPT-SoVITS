@@ -148,6 +148,7 @@ import config as global_config
 import logging
 import subprocess
 
+from fastapi.middleware.cors import CORSMiddleware
 
 class DefaultRefer:
     def __init__(self, path, text, language):
@@ -569,9 +570,9 @@ parser = argparse.ArgumentParser(description="GPT-SoVITS api")
 
 parser.add_argument("-s", "--sovits_path", type=str, default=g_config.sovits_path, help="SoVITS模型路径")
 parser.add_argument("-g", "--gpt_path", type=str, default=g_config.gpt_path, help="GPT模型路径")
-parser.add_argument("-dr", "--default_refer_path", type=str, default="", help="默认参考音频路径")
-parser.add_argument("-dt", "--default_refer_text", type=str, default="", help="默认参考音频文本")
-parser.add_argument("-dl", "--default_refer_language", type=str, default="", help="默认参考音频语种")
+parser.add_argument("-dr", "--default_refer_path", type=str, default=g_config.refer_path, help="默认参考音频路径")
+parser.add_argument("-dt", "--default_refer_text", type=str, default=g_config.refer_text, help="默认参考音频文本")
+parser.add_argument("-dl", "--default_refer_language", type=str, default=g_config.refer_language, help="默认参考音频语种")
 parser.add_argument("-d", "--device", type=str, default=g_config.infer_device, help="cuda / cpu")
 parser.add_argument("-a", "--bind_addr", type=str, default="0.0.0.0", help="default: 0.0.0.0")
 parser.add_argument("-p", "--port", type=int, default=g_config.api_port, help="default: 9880")
@@ -663,6 +664,19 @@ change_gpt_weights(gpt_path)
 # 接口部分
 # --------------------------------
 app = FastAPI()
+origins = [
+    "http://localhost",
+    "http://localhost:*",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 @app.post("/set_model")
 async def set_model(request: Request):
