@@ -16,8 +16,8 @@ with open(refer_text_path, 'r') as f:
 if refer_text == "":
     print("refer_text is Empty !")
 # 推理用的指定模型
-sovits_path = "./SoVITS_weights/noa_1_e8_s680.pth"
-gpt_path = "./GPT_weights/noa_1-e15.ckpt"
+sovits_path = "./SoVITS_weights/default.pth"
+gpt_path = "./GPT_weights/default.ckpt"
 
 is_half_str = os.environ.get("is_half", "True")
 is_half = True if is_half_str.lower() == 'true' else False
