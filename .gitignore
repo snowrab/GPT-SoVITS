@@ -16,3 +16,4 @@ GPT_Sovits/pretrained_models
 refers/
 *.wav
 *.ipynb
+*.log

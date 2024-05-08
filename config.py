@@ -4,8 +4,8 @@ import torch
 import csv
 
 refer_language = 'ja'
-refer_path = "./refers/noa_002_0009.wav"
-refer_text_path = "./refers/esd.list"
+refer_path = "./refers/default.wav"
+refer_text_path = "./refers/default.list"
 refer_text = ""
 with open(refer_text_path, 'r') as f:
     reader = csv.reader(f, delimiter='|')
