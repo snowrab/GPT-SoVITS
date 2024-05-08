@@ -3,6 +3,7 @@ from PyQt5.QtCore import QEvent
 from PyQt5.QtWidgets import QApplication, QMainWindow, QLabel, QLineEdit, QPushButton, QTextEdit
 from PyQt5.QtWidgets import QGridLayout, QVBoxLayout, QWidget, QFileDialog, QStatusBar, QComboBox
 import soundfile as sf
+import csv
 
 from tools.i18n.i18n import I18nAuto
 i18n = I18nAuto()
@@ -135,6 +136,14 @@ class GPTSoVITSGUI(QMainWindow):
 
         self.clear_output_button = QPushButton("清空输出")
         self.clear_output_button.clicked.connect(self.clear_output)
+        
+        # 添加新的控件来从服务器输入音频
+        self.audio_path_input = QLineEdit(self)
+        self.audio_path_input.setPlaceholderText("输入服务器上的音频路径")
+        self.text_path_input = QLineEdit(self)
+        self.text_path_input.setPlaceholderText("输入参考文本文件的路径")
+        self.confirm_paths_button = QPushButton("确认路径", self)
+        self.confirm_paths_button.clicked.connect(self.confirm_paths)
 
         self.status_bar = QStatusBar()
 
@@ -174,7 +183,9 @@ class GPTSoVITSGUI(QMainWindow):
         input_layout.addWidget(self.output_label, 15, 0)
         input_layout.addWidget(self.output_input, 16, 0, 1, 2)
         input_layout.addWidget(self.output_button, 16, 2)
-        
+        input_layout.addWidget(self.audio_path_input, 18, 0, 1, 2)
+        input_layout.addWidget(self.text_path_input, 19, 0, 1, 2)
+        input_layout.addWidget(self.confirm_paths_button, 20, 0, 1, 2)
         main_layout.addLayout(input_layout)
 
         output_layout = QVBoxLayout()
@@ -190,6 +201,24 @@ class GPTSoVITSGUI(QMainWindow):
         self.central_widget = QWidget()
         self.central_widget.setLayout(main_layout)
         self.setCentralWidget(self.central_widget)
+
+    def confirm_paths(self):
+        audio_path = self.audio_path_input.text()
+        text_path = self.text_path_input.text()
+        self.ref_text = self.get_refer_text(audio_path, text_path)
+        self.ref_audio_input.setText(audio_path)
+        self.ref_text_input.setText(self.ref_text)
+
+
+
+    def get_refer_text(self, audio_path, text_path):
+        audio_filename = audio_path.split('/')[-1]
+        with open(text_path, 'r', encoding='utf-8') as f:
+            reader = csv.reader(f, delimiter='|')
+            for row in reader:
+                if row[0] == audio_filename:
+                    return row[3].strip()
+        return ""  # 如果找不到匹配项，返回空字符串
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():

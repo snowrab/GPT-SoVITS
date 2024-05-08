@@ -1,0 +1,1 @@
+SoVITS_weights/noa_1_e25_s2125.pth
