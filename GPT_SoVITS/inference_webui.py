@@ -551,7 +551,7 @@ def get_weights_names():
 def get_refer_text(refer_text_path,refer_audio_path):
     refer_text = ""
     print("start get_refer_txt func")
-    if refer_text_path == "" or refer_audio_path == "":
+    if refer_audio_path == "":
         refer_audio_path = "./refers/default.wav"
         refer_text_path = "./refers/default.list"
     print("refer:",refer_text_path,refer_audio_path)
@@ -569,6 +569,24 @@ def load_audio_from_path(refer_text_path,refer_audio_path):
         inp_ref = "./refers/default.wav"
     prompt_text = get_refer_text(refer_text_path, refer_audio_path)
     return prompt_text, inp_ref
+
+
+def get_audio_files(directory):
+    """获取目录中的音频文件列表，支持.wav、.ogg和.aac格式"""
+    audio_extensions = ['.wav', '.ogg', '.aac']
+    try:
+        return [file for file in os.listdir(directory)
+                if os.path.isfile(os.path.join(directory, file)) and os.path.splitext(file)[1].lower() in audio_extensions]
+    except FileNotFoundError:
+        return []
+
+def get_text_files(directory):
+    """获取目录中以.list结尾的文本文件列表"""
+    try:
+        return [file for file in os.listdir(directory)
+                if os.path.isfile(os.path.join(directory, file)) and file.endswith('.list')]
+    except FileNotFoundError:
+        return []
 
 SoVITS_names, GPT_names = get_weights_names()
 
@@ -592,9 +610,10 @@ with gr.Blocks(title="GPT-SoVITS WebUI") as app:
                 ref_text_free = gr.Checkbox(label=i18n("开启无参考文本模式。不填参考文本亦相当于开启。"), value=False, interactive=True, show_label=True)
                 gr.Markdown(i18n("使用无参考文本模式时建议使用微调的GPT，听不清参考音频说的啥(不晓得写啥)可以开，开启后无视填写的参考文本。"))
                 prompt_text = gr.Textbox(label=i18n("参考音频的文本"), value="")
-                
-                refer_audio_path = gr.Textbox(label="参考音频路径", placeholder="请输入参考音频文件的路径")
-                refer_text_path = gr.Textbox(label="参考文本路径", placeholder="请输入参考文本文件的路径")
+                audio_files = get_audio_files("./refers")
+                text_files = get_text_files("./refers")
+                refer_audio_path = gr.Dropdown(label="选择参考音频文件", choices=audio_files, value=audio_files[0] if audio_files else None)
+                refer_text_path = gr.Dropdown(label="选择参考文本文件", choices=text_files, value=text_files[0] if text_files else None)
                 button_refer_txt = gr.Button("读取参考文本")
                 output_text = gr.Textbox(label="文件中的参考文本", interactive=False)
                 button_refer = gr.Button("从路径加载参考音频和文本")
