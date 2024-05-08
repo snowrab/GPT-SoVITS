@@ -17,6 +17,8 @@ logging.getLogger("charset_normalizer").setLevel(logging.ERROR)
 logging.getLogger("torchaudio._extension").setLevel(logging.ERROR)
 import pdb
 import torch
+import csv
+import IPython.display as ipd
 
 if os.path.exists("./gweight.txt"):
     with open("./gweight.txt", 'r', encoding="utf-8") as file:
@@ -332,7 +334,8 @@ def get_tts_wav(ref_wav_path, prompt_text, prompt_language, text, text_language,
     with torch.no_grad():
         wav16k, sr = librosa.load(ref_wav_path, sr=16000)
         if (wav16k.shape[0] > 160000 or wav16k.shape[0] < 48000):
-            raise OSError(i18n("参考音频在3~10秒范围外，请更换！"))
+            pass
+            # raise OSError(i18n("参考音频在3~10秒范围外，请更换！"))
         wav16k = torch.from_numpy(wav16k)
         zero_wav_torch = torch.from_numpy(zero_wav)
         if is_half == True:
@@ -545,6 +548,27 @@ def get_weights_names():
         if name.endswith(".ckpt"): GPT_names.append("%s/%s" % (GPT_weight_root, name))
     return SoVITS_names, GPT_names
 
+def get_refer_text(refer_text_path,refer_audio_path):
+    refer_text = ""
+    print("start get_refer_txt func")
+    if refer_text_path == "" or refer_audio_path == "":
+        refer_audio_path = "./refers/default.wav"
+        refer_text_path = "./refers/default.list"
+    print("refer:",refer_text_path,refer_audio_path)
+    with open(refer_text_path, 'r') as f:
+        reader = csv.reader(f, delimiter='|')
+        for row in reader:
+            if row[0] == refer_audio_path.split('/')[-1]:
+                refer_text = row[3].strip()
+                break
+    return refer_text
+
+def load_audio_from_path(refer_text_path,refer_audio_path):
+    inp_ref = refer_audio_path
+    if inp_ref == "":
+        inp_ref = "./refers/default.wav"
+    prompt_text = get_refer_text(refer_text_path, refer_audio_path)
+    return prompt_text, inp_ref
 
 SoVITS_names, GPT_names = get_weights_names()
 
@@ -568,6 +592,15 @@ with gr.Blocks(title="GPT-SoVITS WebUI") as app:
                 ref_text_free = gr.Checkbox(label=i18n("开启无参考文本模式。不填参考文本亦相当于开启。"), value=False, interactive=True, show_label=True)
                 gr.Markdown(i18n("使用无参考文本模式时建议使用微调的GPT，听不清参考音频说的啥(不晓得写啥)可以开，开启后无视填写的参考文本。"))
                 prompt_text = gr.Textbox(label=i18n("参考音频的文本"), value="")
+                
+                refer_audio_path = gr.Textbox(label="参考音频路径", placeholder="请输入参考音频文件的路径")
+                refer_text_path = gr.Textbox(label="参考文本路径", placeholder="请输入参考文本文件的路径")
+                button_refer_txt = gr.Button("读取参考文本")
+                output_text = gr.Textbox(label="文件中的参考文本", interactive=False)
+                button_refer = gr.Button("从路径加载参考音频和文本")
+                button_refer_txt.click(fn=get_refer_text, inputs=[refer_text_path,refer_audio_path], outputs=output_text)
+                button_refer.click(fn=load_audio_from_path, inputs=[refer_text_path,refer_audio_path], outputs=[prompt_text,inp_ref])
+            
             prompt_language = gr.Dropdown(
                 label=i18n("参考音频的语种"), choices=[i18n("中文"), i18n("英文"), i18n("日文"), i18n("中英混合"), i18n("日英混合"), i18n("多语种混合")], value=i18n("中文")
             )
