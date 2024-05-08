@@ -571,19 +571,19 @@ def load_audio_from_path(refer_text_path,refer_audio_path):
     return prompt_text, inp_ref
 
 
-def get_audio_files(directory):
+def get_audio_files(directory='./refers'):
     """获取目录中的音频文件列表，支持.wav、.ogg和.aac格式"""
     audio_extensions = ['.wav', '.ogg', '.aac']
     try:
-        return [file for file in os.listdir(directory)
+        return [os.path.join(directory,file) for file in os.listdir(directory)
                 if os.path.isfile(os.path.join(directory, file)) and os.path.splitext(file)[1].lower() in audio_extensions]
     except FileNotFoundError:
         return []
 
-def get_text_files(directory):
+def get_text_files(directory='./refers'):
     """获取目录中以.list结尾的文本文件列表"""
     try:
-        return [file for file in os.listdir(directory)
+        return [os.path.join(directory,file) for file in os.listdir(directory)
                 if os.path.isfile(os.path.join(directory, file)) and file.endswith('.list')]
     except FileNotFoundError:
         return []
@@ -621,13 +621,13 @@ with gr.Blocks(title="GPT-SoVITS WebUI") as app:
                 button_refer.click(fn=load_audio_from_path, inputs=[refer_text_path,refer_audio_path], outputs=[prompt_text,inp_ref])
             
             prompt_language = gr.Dropdown(
-                label=i18n("参考音频的语种"), choices=[i18n("中文"), i18n("英文"), i18n("日文"), i18n("中英混合"), i18n("日英混合"), i18n("多语种混合")], value=i18n("中文")
+                label=i18n("参考音频的语种"), choices=[i18n("中文"), i18n("英文"), i18n("日文"), i18n("中英混合"), i18n("日英混合"), i18n("多语种混合")], value=i18n("日英混合")
             )
         gr.Markdown(value=i18n("*请填写需要合成的目标文本和语种模式"))
         with gr.Row():
             text = gr.Textbox(label=i18n("需要合成的文本"), value="")
             text_language = gr.Dropdown(
-                label=i18n("需要合成的语种"), choices=[i18n("中文"), i18n("英文"), i18n("日文"), i18n("中英混合"), i18n("日英混合"), i18n("多语种混合")], value=i18n("中文")
+                label=i18n("需要合成的语种"), choices=[i18n("中文"), i18n("英文"), i18n("日文"), i18n("中英混合"), i18n("日英混合"), i18n("多语种混合")], value=i18n("日英混合")
             )
             how_to_cut = gr.Radio(
                 label=i18n("怎么切"),
@@ -671,4 +671,5 @@ app.queue(max_size=1022).launch(
     share=is_share,
     server_port=infer_ttswebui,
     quiet=True,
+    auth = ("why","qwertyu"),
 )

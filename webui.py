@@ -875,4 +875,5 @@ with gr.Blocks(title="GPT-SoVITS WebUI") as app:
         share=is_share,
         server_port=webui_port_main,
         quiet=True,
+        auth=["why","qwertyu"],
     )
